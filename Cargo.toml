@@ -1,0 +1,16 @@
+[package]
+name = "edcert-tools"
+version = "0.1.1"
+authors = ["Marvin Böcker <marvin.boecker@udo.edu>"]
+
+[[bin]]
+name = "edcert"
+
+[dependencies]
+chrono = "^0.2"
+time = "^0.1"
+edcert = "^6.0"
+edcert-compressor = "^1.0"
+edcert-restrevoke = "^1.0"
+edcert-letter = "^1.0"
+rustc-serialize = "^0.3"

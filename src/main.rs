@@ -5,11 +5,15 @@ extern crate edcert_compressor;
 extern crate chrono;
 extern crate time;
 extern crate rustc_serialize;
+extern crate threadpool;
+extern crate num_cpus;
 
 use edcert::certificate::Certificate;
-use edcert::certificate_validator::CertificateValidator;
-use edcert::certificate_validator::Revoker;
 use edcert::signature::Signature;
+
+use edcert::validator::Validator;
+use edcert::trust_validator::TrustValidator;
+use edcert::revoker::Revoker;
 
 fn main() {
     use std::env;
@@ -25,6 +29,8 @@ fn main() {
         Gen(String, String),
         GenMaster(String),
         Extract(String),
+        LetterSign(String, Vec<String>),
+        LetterVerify(String, String),
     }
 
     let mut op = Operation::Help;
@@ -91,6 +97,49 @@ fn main() {
                     Operation::Help
                 }
             }
+            "letter-sign" => {
+                let arg = cmds.nth(0);
+                let mut vec = Vec::new();
+
+                for key in cmds {
+                    use std::fs::File;
+
+                    match File::open(&key) {
+                        Ok(x) => {
+                            match x.metadata() {
+                                Ok(x) => {
+                                    if x.is_file() {
+                                        vec.push(key.to_string());
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        _ => {}
+                    };
+                }
+
+                if arg.is_some() {
+                    if !vec.is_empty() {
+                        Operation::LetterSign(arg.unwrap(), vec)
+                    } else {
+                        Operation::LetterSign(arg.unwrap(), vec)
+                    }
+                } else {
+                    missing_option();
+                    Operation::Help
+                }
+            }
+            "letter-verify" => {
+                let arg = cmds.nth(0);
+                let arg2 = cmds.nth(0);
+                if arg.is_some() && arg2.is_some() {
+                    Operation::LetterVerify(arg.unwrap(), arg2.unwrap())
+                } else {
+                    missing_option();
+                    Operation::Help
+                }
+            }
             x => {
                 println!("Error: Unknown command: {}", x);
                 println!("");
@@ -111,6 +160,8 @@ fn main() {
             edcert_sign_cert(parent_filename, certificate_filename)
         }
         Operation::Extract(filename) => edcert_extract(filename),
+        Operation::LetterSign(certificate, letter) => edcert_sign_letter(certificate, &letter),
+        Operation::LetterVerify(certificate, letter) => edcert_verify_letter(certificate, letter),
     }
 }
 
@@ -168,7 +219,7 @@ fn edcert_help() {
 
 fn edcert_info(filename: String) {
     use edcert_compressor::certificate_loader::CertificateLoader;
-    use edcert::certificate_validator::CertificateValidator;
+    use edcert::trust_validator::TrustValidator;
     use edcert_restrevoke::restrevoker::RestRevoker;
     use std::fs::File;
     use std::io::Read;
@@ -196,18 +247,41 @@ fn edcert_info(filename: String) {
         println!("Use -m <keyfile> to override");
     }
 
-    let mut mpkfile = File::open(&mpkfile).expect("Failed to open public key file.");
+    let mut mpkfile = match File::open(&mpkfile) {
+        Err(_) => {
+            println!("Failed to open public key file.");
+            return;
+        }
+        Ok(x) => x,
+    };
     let mut mpk = [0; 32];
-    mpkfile.read_exact(&mut mpk).expect("Failed to read public key");
+    match mpkfile.read_exact(&mut mpk) {
+        Err(_) => {
+            println!("Failed to read public key");
+            return;
+        }
+        Ok(x) => x,
+    };
 
     if print {
         print!("Loading Certificate {} for inspection...", filename);
     }
 
-    let cv = CertificateValidator::new(&mpk,
-                                       RestRevoker::new("https://api.rombie.\
-                                                         de/v1/is_revoked?public_key="));
-    let cert = CertificateLoader::load_from_file(&filename).expect("Failed to load certificate");
+    let cv = TrustValidator::new(&mpk,
+                                 RestRevoker::new("https://api.rombie.\
+                                                   de/v1/is_revoked?public_key="));
+    let cert = CertificateLoader::load_from_file(&filename);
+
+    let cert = match cert {
+        Err(x) => {
+            if print {
+                println!("Failed!");
+            }
+            println!("{}", x);
+            return;
+        }
+        Ok(x) => x,
+    };
 
     if print {
         println!(" Done!");
@@ -246,18 +320,41 @@ fn edcert_gen_master(filename: String) {
     {
         let sk_filename = format!("{}.secretkey", filename);
         print!("Writing secret key to {}...", sk_filename);
-        let mut sk_file = File::create(&sk_filename)
-                              .expect(&format!("Failed to create secret keyfile {}", &sk_filename));
-        sk_file.write(&msk).expect("Failed to write private key");
+        let mut sk_file = match File::create(&sk_filename) {
+            Err(_) => {
+                println!("Failed to create secret keyfile {}", &sk_filename);
+                return;
+            }
+            Ok(x) => x,
+        };
+        match sk_file.write(&msk) {
+            Err(_) => {
+                println!("Failed to write private key");
+                return;
+            }
+            Ok(x) => x,
+        };
         println!(" Done!");
     }
 
     {
         let pk_filename = format!("{}.pub", filename);
         print!("Writing public key to {}...", pk_filename);
-        let mut pk_file = File::create(&pk_filename)
-                              .expect(&format!("Failed to create public keyfile {}", &pk_filename));
-        pk_file.write(&mpk).expect("Failed to write public key");
+        let mut pk_file = match File::create(&pk_filename) {
+            Err(_) => {
+                println!("Failed to create public keyfile {}", &pk_filename);
+                return;
+            }
+            Ok(x) => x,
+        };
+        match pk_file.write(&mpk) {
+            Err(_) => {
+                println!("Failed to write public key");
+                return;
+            }
+            Ok(x) => x,
+        };
+
         println!(" Done!");
     }
 }
@@ -276,7 +373,12 @@ fn edcert_gen_cert(mut filename: String, expiration_date_str: String) {
 
     let mut expiration_date: DateTime<UTC>;
 
-    if expiration_date_str.chars().next().expect("Expiration date empty") == '+' {
+    if expiration_date_str.is_empty() {
+        println!("Expiration date is empty");
+        return;
+    }
+
+    if expiration_date_str.chars().next().unwrap() == '+' {
         expiration_date = UTC::now();
         let mut iter = expiration_date_str.chars();
         iter.next();
@@ -383,8 +485,13 @@ fn edcert_gen_cert(mut filename: String, expiration_date_str: String) {
         filename = format!("{}.edc", &filename);
     }
 
-    CertificateLoader::save_to_file(&cert, &filename)
-        .expect("Failed to write certificate.");
+    match CertificateLoader::save_to_file(&cert, &filename) {
+        Err(_) => {
+            println!("Failed to write certificate.");
+            return;
+        }
+        _ => {}
+    };
 }
 
 fn edcert_sign_master(certificate_filename: String, master_filename: String) {
@@ -438,6 +545,14 @@ fn to_bytestr(vec: &[u8]) -> String {
     bytestr.join("")
 }
 
+fn from_bytestr(vec: &str) -> Option<Vec<u8>> {
+    use rustc_serialize::hex::FromHex;
+    match vec.from_hex() {
+        Ok(x) => Some(x),
+        Err(_) => None,
+    }
+}
+
 fn print<T: std::fmt::Display>(indent: usize, text: T) {
     for _ in 0..indent {
         print!("    ");
@@ -446,9 +561,7 @@ fn print<T: std::fmt::Display>(indent: usize, text: T) {
     println!("{}", text);
 }
 
-fn print_signature<T: Revoker>(signature: &Signature,
-                               indent: usize,
-                               cv: &CertificateValidator<T>) {
+fn print_signature<R: Revoker>(signature: &Signature, indent: usize, cv: &TrustValidator<R>) {
     print(indent, "Signature:");
 
     print(indent + 1,
@@ -463,7 +576,7 @@ fn print_signature<T: Revoker>(signature: &Signature,
     }
 }
 
-fn print_cert<T: Revoker>(cert: &Certificate, indent: usize, cv: &CertificateValidator<T>) {
+fn print_cert<R: Revoker>(cert: &Certificate, indent: usize, cv: &TrustValidator<R>) {
     print(indent, "Certificate");
     for (key, value) in cert.meta().values() {
         let tabs = if key.len() < 7 {
@@ -485,4 +598,213 @@ fn print_cert<T: Revoker>(cert: &Certificate, indent: usize, cv: &CertificateVal
     } else {
         print(indent, "Not signed");
     }
+}
+
+fn edcert_sign_letter(certificate_filename: String, letter_filenames: &[String]) {
+    use std::io::Read;
+    use std::fs::File;
+    use std::sync::mpsc;
+    use std::sync::Arc;
+    use edcert_compressor::certificate_loader::CertificateLoader;
+    use threadpool::ThreadPool;
+
+    let cert = match CertificateLoader::load_from_file(&certificate_filename) {
+        Err(x) => {
+            println!("Failed to load certificate!");
+            println!("{}", x);
+            return;
+        }
+        Ok(x) => x,
+    };
+
+    if !letter_filenames.is_empty() {
+        let pool = ThreadPool::new(num_cpus::get());
+        let cert = Arc::new(cert);
+        let (sendr, recvr) = mpsc::channel();
+
+        for letter_filename in letter_filenames {
+
+            let letter_filename = letter_filename.to_owned();
+            let cert = cert.clone();
+            let sendr = sendr.clone();
+
+            pool.execute(move || {
+                let mut content = Vec::new();
+
+                let mut letter = match File::open(&letter_filename) {
+                    Err(x) => {
+                        println!("Failed to open letter!");
+                        println!("{}", x);
+                        return;
+                    }
+                    Ok(x) => x,
+                };
+
+                match letter.read_to_end(&mut content) {
+                    Ok(x) => x,
+                    _ => {
+                        println!("Failed to read letter content!");
+                        return;
+                    }
+                };
+
+                let sig = cert.sign(&content).expect("Failed to sign content.");
+
+                sendr.send(format!("{}  {}", to_bytestr(&sig), letter_filename));
+            });
+        }
+
+        for _ in 0..letter_filenames.len() {
+            println!("{}", recvr.recv().unwrap());
+        }
+    } else {
+        let mut content = Vec::new();
+
+        let mut letter = std::io::stdin();
+
+        match letter.read_to_end(&mut content) {
+            Ok(x) => x,
+            _ => {
+                println!("Failed to read letter content!");
+                return;
+            }
+        };
+
+        let sig = cert.sign(&content).expect("Failed to sign content.");
+
+        println!("{}  -", to_bytestr(&sig));
+    }
+}
+
+fn edcert_verify_letter(certificate_filename: String, letter_filename: String) {
+    use std::io::Read;
+    use std::io::BufReader;
+    use std::io::BufRead;
+    use std::fs::File;
+    use std::sync::mpsc;
+    use std::sync::Arc;
+    use edcert_compressor::certificate_loader::CertificateLoader;
+    use threadpool::ThreadPool;
+
+    let cert = match CertificateLoader::load_from_file(&certificate_filename) {
+        Err(x) => {
+            println!("Failed to load certificate!");
+            println!("{}", x);
+            return;
+        }
+        Ok(x) => x,
+    };
+
+    let cert = Arc::new(cert);
+
+    let letter = match File::open(&letter_filename) {
+        Err(x) => {
+            println!("Failed to open letter!");
+            println!("{}", x);
+            return;
+        }
+        Ok(x) => x,
+    };
+
+    let letter = BufReader::new(letter);
+
+    enum Status {
+        Valid,
+        Invalid,
+        Failed,
+    }
+    let (sendr, recvr) = mpsc::channel();
+    let pool = ThreadPool::new(num_cpus::get());
+
+    let mut num_all = 0;
+
+    for line in letter.lines() {
+        let sendr = sendr.clone();
+        let cert = cert.clone();
+        num_all += 1;
+
+        pool.execute(move || {
+            let line = line.expect("Failed to read line");
+            let (hash, filename) = line.split_at(128);
+            let hash = hash.trim();
+
+            let hash = match from_bytestr(hash) {
+                Some(x) => x,
+                None => {
+                    println!("{}\t{}", "FAILED", filename);
+                    sendr.send(Status::Failed);
+                    return;
+                }
+            };
+
+            let filename = filename.trim();
+
+            let mut file = match File::open(filename) {
+                Ok(x) => x,
+                _ => {
+                    println!("{}\t{}", "FAILED", filename);
+                    sendr.send(Status::Failed);
+                    return;
+                }
+            };
+
+            let mut content = Vec::<u8>::new();
+
+            match file.read_to_end(&mut content) {
+                Ok(_) => {}
+                Err(_) => {
+                    println!("{}\t{}", "FAILED", filename);
+                    sendr.send(Status::Failed);
+                    return;
+                }
+            };
+
+            let valid = cert.verify(&content, &hash);
+
+            if valid {
+                println!("{}\t{}", "VALID", filename);
+            } else {
+                println!("{}\t{}", "INVALID", filename);
+            }
+
+            if valid {
+                sendr.send(Status::Valid);
+            } else {
+                sendr.send(Status::Invalid);
+            }
+        });
+    }
+
+    let mut num_valid = 0;
+    let mut num_invalid = 0;
+    let mut num_failed = 0;
+
+    for _ in 0..num_all {
+        let status = recvr.recv().expect("Failed to recv data from channel");
+        match status {
+            Status::Valid => {
+                num_valid += 1;
+            }
+            Status::Invalid => {
+                num_invalid += 1;
+            }
+            Status::Failed => {
+                num_failed += 1;
+            }
+        }
+    }
+
+    println!("Statistics: ");
+    println!("Valid: {}/{} ({:.2}%)",
+             num_valid,
+             num_all,
+             num_valid as f64 / num_all as f64 * 100.0);
+    println!("Invalid: {}/{} ({:.2}%)",
+             num_invalid,
+             num_all,
+             num_invalid as f64 / num_all as f64 * 100.0);
+    println!("Failed: {}/{} ({:.2}%)",
+             num_failed,
+             num_all,
+             num_failed as f64 / num_all as f64 * 100.0);
 }

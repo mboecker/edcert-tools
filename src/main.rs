@@ -18,9 +18,6 @@ use edcert::revoker::Revoker;
 fn main() {
     use std::env;
 
-    let mut cmds = env::args();
-    let cmd = cmds.nth(1);
-
     enum Operation {
         Help,
         Info(String),
@@ -32,6 +29,9 @@ fn main() {
         LetterSign(String, Vec<String>),
         LetterVerify(String, String),
     }
+
+    let mut cmds = env::args();
+    let cmd = cmds.nth(1);
 
     let mut op = Operation::Help;
 
@@ -104,27 +104,17 @@ fn main() {
                 for key in cmds {
                     use std::fs::File;
 
-                    match File::open(&key) {
-                        Ok(x) => {
-                            match x.metadata() {
-                                Ok(x) => {
-                                    if x.is_file() {
-                                        vec.push(key.to_string());
-                                    }
-                                }
-                                _ => {}
+                    if let Ok(x) = File::open(&key) {
+                        if let Ok(x) = x.metadata() {
+                            if x.is_file() {
+                                vec.push(key.to_string());
                             }
                         }
-                        _ => {}
-                    };
+                    }
                 }
 
                 if arg.is_some() {
-                    if !vec.is_empty() {
-                        Operation::LetterSign(arg.unwrap(), vec)
-                    } else {
-                        Operation::LetterSign(arg.unwrap(), vec)
-                    }
+                    Operation::LetterSign(arg.unwrap(), vec)
                 } else {
                     missing_option();
                     Operation::Help
@@ -162,7 +152,7 @@ fn main() {
         Operation::Extract(filename) => edcert_extract(filename),
         Operation::LetterSign(certificate, letter) => edcert_sign_letter(certificate, &letter),
         Operation::LetterVerify(certificate, letter) => edcert_verify_letter(certificate, letter),
-    }
+    };
 }
 
 #[derive(PartialEq)]
@@ -288,11 +278,12 @@ fn edcert_info(filename: String) {
         println!("");
     }
 
-    if !full_info {
-        if cert.has_private_key() {
-            if print {
-                println!("Knows its private key!");
-            }
+    if full_info {
+        print_cert(&cert, 0, &cv);
+    }
+    else {
+        if cert.has_private_key() && print {
+            println!("Knows its private key!");
         }
 
         match cv.is_valid(&cert) {
@@ -303,8 +294,6 @@ fn edcert_info(filename: String) {
                 println!("\rInvalid, because {}", why);
             }
         }
-    } else {
-        print_cert(&cert, 0, &cv);
     }
 }
 
@@ -314,7 +303,7 @@ fn edcert_gen_master(filename: String) {
     use std::io::Write;
 
     print!("Generating master keypair...");
-    let (mpk, msk) = generate_keypair();
+    let (mpubkey, mseckey) = generate_keypair();
     println!(" Done!");
 
     {
@@ -327,7 +316,7 @@ fn edcert_gen_master(filename: String) {
             }
             Ok(x) => x,
         };
-        match sk_file.write(&msk) {
+        match sk_file.write(&mseckey) {
             Err(_) => {
                 println!("Failed to write private key");
                 return;
@@ -347,7 +336,7 @@ fn edcert_gen_master(filename: String) {
             }
             Ok(x) => x,
         };
-        match pk_file.write(&mpk) {
+        match pk_file.write(&mpubkey) {
             Err(_) => {
                 println!("Failed to write public key");
                 return;
@@ -453,11 +442,11 @@ fn edcert_gen_cert(mut filename: String, expiration_date_str: String) {
         {
             let line = line.trim();
 
-            if line.len() == 0 {
+            if line.is_empty() {
                 break;
             }
 
-            if let Some(pos) = line.find("=") {
+            if let Some(pos) = line.find('=') {
                 let (mut key, mut value) = line.split_at(pos);
                 value = value[1..].trim();
                 key = key.trim();
@@ -481,16 +470,13 @@ fn edcert_gen_cert(mut filename: String, expiration_date_str: String) {
                   not be valid.");
     }
 
-    if !filename.contains(".") {
+    if !filename.contains('.') {
         filename = format!("{}.edc", &filename);
     }
 
-    match CertificateLoader::save_to_file(&cert, &filename) {
-        Err(_) => {
-            println!("Failed to write certificate.");
-            return;
-        }
-        _ => {}
+    if let Err(_) = CertificateLoader::save_to_file(&cert, &filename) {
+        println!("Failed to write certificate.");
+        return;
     };
 }
 
@@ -617,7 +603,23 @@ fn edcert_sign_letter(certificate_filename: String, letter_filenames: &[String])
         Ok(x) => x,
     };
 
-    if !letter_filenames.is_empty() {
+    if letter_filenames.is_empty() {
+        let mut content = Vec::new();
+
+        let mut letter = std::io::stdin();
+
+        match letter.read_to_end(&mut content) {
+            Ok(x) => x,
+            _ => {
+                println!("Failed to read letter content!");
+                return;
+            }
+        };
+
+        let sig = cert.sign(&content).expect("Failed to sign content.");
+
+        println!("{}  -", to_bytestr(&sig));
+    } else {
         let pool = ThreadPool::new(num_cpus::get());
         let cert = Arc::new(cert);
         let (sendr, recvr) = mpsc::channel();
@@ -650,29 +652,13 @@ fn edcert_sign_letter(certificate_filename: String, letter_filenames: &[String])
 
                 let sig = cert.sign(&content).expect("Failed to sign content.");
 
-                sendr.send(format!("{}  {}", to_bytestr(&sig), letter_filename));
+                sendr.send(format!("{}  {}", to_bytestr(&sig), letter_filename)).unwrap();
             });
         }
 
         for _ in 0..letter_filenames.len() {
             println!("{}", recvr.recv().unwrap());
         }
-    } else {
-        let mut content = Vec::new();
-
-        let mut letter = std::io::stdin();
-
-        match letter.read_to_end(&mut content) {
-            Ok(x) => x,
-            _ => {
-                println!("Failed to read letter content!");
-                return;
-            }
-        };
-
-        let sig = cert.sign(&content).expect("Failed to sign content.");
-
-        println!("{}  -", to_bytestr(&sig));
     }
 }
 
@@ -685,6 +671,12 @@ fn edcert_verify_letter(certificate_filename: String, letter_filename: String) {
     use std::sync::Arc;
     use edcert_compressor::certificate_loader::CertificateLoader;
     use threadpool::ThreadPool;
+
+    enum Status {
+        Valid,
+        Invalid,
+        Failed,
+    }
 
     let cert = match CertificateLoader::load_from_file(&certificate_filename) {
         Err(x) => {
@@ -708,11 +700,6 @@ fn edcert_verify_letter(certificate_filename: String, letter_filename: String) {
 
     let letter = BufReader::new(letter);
 
-    enum Status {
-        Valid,
-        Invalid,
-        Failed,
-    }
     let (sendr, recvr) = mpsc::channel();
     let pool = ThreadPool::new(num_cpus::get());
 
@@ -732,7 +719,7 @@ fn edcert_verify_letter(certificate_filename: String, letter_filename: String) {
                 Some(x) => x,
                 None => {
                     println!("{}\t{}", "FAILED", filename);
-                    sendr.send(Status::Failed);
+                    sendr.send(Status::Failed).unwrap();
                     return;
                 }
             };
@@ -743,7 +730,7 @@ fn edcert_verify_letter(certificate_filename: String, letter_filename: String) {
                 Ok(x) => x,
                 _ => {
                     println!("{}\t{}", "FAILED", filename);
-                    sendr.send(Status::Failed);
+                    sendr.send(Status::Failed).unwrap();
                     return;
                 }
             };
@@ -754,7 +741,7 @@ fn edcert_verify_letter(certificate_filename: String, letter_filename: String) {
                 Ok(_) => {}
                 Err(_) => {
                     println!("{}\t{}", "FAILED", filename);
-                    sendr.send(Status::Failed);
+                    sendr.send(Status::Failed).unwrap();
                     return;
                 }
             };
@@ -768,9 +755,9 @@ fn edcert_verify_letter(certificate_filename: String, letter_filename: String) {
             }
 
             if valid {
-                sendr.send(Status::Valid);
+                sendr.send(Status::Valid).unwrap();
             } else {
-                sendr.send(Status::Invalid);
+                sendr.send(Status::Invalid).unwrap();
             }
         });
     }

@@ -28,6 +28,7 @@ fn main() {
         Extract(String),
         LetterSign(String, Vec<String>),
         LetterVerify(String, String),
+        Publish(String),
     }
 
     let mut cmds = env::args();
@@ -130,6 +131,15 @@ fn main() {
                     Operation::Help
                 }
             }
+            "publish" => {
+                let arg = cmds.nth(0);
+                if arg.is_some() {
+                    Operation::Publish(arg.unwrap())
+                } else {
+                    missing_option();
+                    Operation::Help
+                }
+            }
             x => {
                 println!("Error: Unknown command: {}", x);
                 println!("");
@@ -143,8 +153,8 @@ fn main() {
         Operation::Info(filename) => edcert_info(filename),
         Operation::GenMaster(filename) => edcert_gen_master(filename),
         Operation::Gen(filename, expiration_date) => edcert_gen_cert(filename, expiration_date),
-        Operation::SignMaster(master_filename, certificate_filename) => {
-            edcert_sign_master(master_filename, certificate_filename)
+        Operation::SignMaster(certificate_filename, master_filename) => {
+            edcert_sign_master(certificate_filename, master_filename)
         }
         Operation::Sign(parent_filename, certificate_filename) => {
             edcert_sign_cert(parent_filename, certificate_filename)
@@ -152,6 +162,7 @@ fn main() {
         Operation::Extract(filename) => edcert_extract(filename),
         Operation::LetterSign(certificate, letter) => edcert_sign_letter(certificate, &letter),
         Operation::LetterVerify(certificate, letter) => edcert_verify_letter(certificate, letter),
+        Operation::Publish(certificate_filename) => edcert_publish(certificate_filename),
     };
 }
 
@@ -196,14 +207,21 @@ fn edcert_help() {
     println!("");
     println!("where OPERATION is one of ...");
     println!("    help \t\t\t\t\t\t Show a help of this program.");
-    println!("    info <filename> \t\t\t\t\t Show information about a certificate.");
+    println!("    info <certificate> \t\t\t\t\t Show information about a certificate.");
+    println!("    extract <certificate> \t\t\t\t Extract the encoded certificate to JSON.");
+    println!("    publish <certificate> \t\t\t\t Removes the private key from the certificate.");
+
     println!("    gen-master <output filename>  \t\t\t Generate a master keypair.");
-    println!("    gen <output filename> <expiration date> \t\t\t\t Generate a random certificate \
+    println!("    gen <output filename> <expiration date> \t\t Generate a random certificate \
               from a secure source.");
+
     println!("    sign-master <certificate> <private keyfile> \t Sign a certificate with a \
               master private key.");
-    println!("    sign <signee> <signer> \t\t\t\t Sign a certificate with a certificate.");
-    println!("    extract <filename> \t\t\t Extract the encoded certificate to JSON.");
+    println!("    sign <parent certificate> <certificate> \t\t Sign a certificate with a certificate.");
+
+    println!("    letter-sign <certificate> <file> ...\t\t Signs the given files and produces a letter.");
+    println!("    letter-verify <certificate> <letter> \t\t Verifies the signatures in the given letter.");
+
     println!("");
 }
 
@@ -708,10 +726,10 @@ fn edcert_verify_letter(certificate_filename: String, letter_filename: String) {
     for line in letter.lines() {
         let sendr = sendr.clone();
         let cert = cert.clone();
+        let line = line.expect("Failed to read line");
         num_all += 1;
 
         pool.execute(move || {
-            let line = line.expect("Failed to read line");
             let (hash, filename) = line.split_at(128);
             let hash = hash.trim();
 
@@ -794,4 +812,28 @@ fn edcert_verify_letter(certificate_filename: String, letter_filename: String) {
              num_failed,
              num_all,
              num_failed as f64 / num_all as f64 * 100.0);
+}
+
+fn edcert_publish(certificate_filename: String) {
+    use edcert_compressor::certificate_loader::CertificateLoader;
+
+    let mut cert = match CertificateLoader::load_from_file(&certificate_filename) {
+        Err(x) => {
+            println!("Failed to load certificate!");
+            println!("{}", x);
+            return;
+        }
+        Ok(x) => x,
+    };
+
+    cert.remove_private_key();
+
+    match CertificateLoader::save_to_file(&cert, &certificate_filename) {
+        Err(x) => {
+            println!("Failed to save certificate!");
+            println!("{}", x);
+            return;
+        },
+        Ok(x) => x,
+    }
 }
